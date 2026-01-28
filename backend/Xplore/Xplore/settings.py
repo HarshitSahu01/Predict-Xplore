@@ -206,6 +206,10 @@ XAI_ALGOS = [
 ]
 # In Xplore/settings.py
 
+GITHUB_MODEL_URLS = [
+    "https://github.com/HarshitSahu01/Predict-Xplore/tree/main/backend/data/models"
+]
+
 # ... (all your other settings)
 
 # --- ADD THESE TWO LINES AT THE END OF THE FILE ---

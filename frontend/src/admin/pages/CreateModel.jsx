@@ -6,6 +6,7 @@ import axios from "axios";
 import { toast } from "react-toastify";
 import SingleSelectDropdown from "../../components/SingleSelectDropdown";
 import { useSelector } from "react-redux";
+import GithubModelPicker from "../../components/GithubModelPicker";
 
 function CreateModel() {
   const user = useSelector(
@@ -17,6 +18,23 @@ function CreateModel() {
   // Common fields
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [showGithubPicker, setShowGithubPicker] = useState(false);
+  const [modelSourceType, setModelSourceType] = useState("file"); // "file" | "link"
+
+  const handleGithubModelSelection = (url) => {
+    setShowGithubPicker(false);
+    if (url) {
+      // For now, we'll store the URL. 
+      // Note: The backend currently expects a file or base64. 
+      // You may need to update the backend to handle URLs or fetch the file here.
+      setModelFile(url);
+      setModelSourceType("link");
+      setIsFileUploaded(true);
+      const fileName = url.split('/').pop();
+      if (!name) setName(fileName);
+      toast.info(`Selected GitHub model: ${fileName}`);
+    }
+  };
 
   // Standard mode fields
   const [modelFile, setModelFile] = useState(null);
@@ -52,8 +70,8 @@ function CreateModel() {
       let formData = new FormData();
 
       if (uploadMode === "standard") {
-        if (!name || !description || !modelFile || !modelImage || !modelType) {
-          alert("All fields are required!");
+        if (!name || !description || !modelFile || !modelType) {
+          alert("Name, Description, Model File, and Model Type are required!");
           return;
         }
 
@@ -65,6 +83,7 @@ function CreateModel() {
         formData.append("created_by", user.username);
         formData.append("classes", JSON.stringify(selectedClass));
         formData.append("roles", JSON.stringify(selectedRoles));
+        formData.append("model_source_type", modelSourceType);
 
         const response = await axios.post(
           "http://127.0.0.1:8000/model/create",
@@ -167,6 +186,15 @@ function CreateModel() {
             <div className="mt-5 flex items-center justify-center w-full h-[25vh] bg-white rounded-2xl">
               {/* Model File */}
               <div className="m-8 pr-20">
+                <p
+                  className="my-2 text-xl text-gray-500 cursor-pointer hover:underline caret-transparent hover:text-blue-600 transition-colors"
+                  onClick={() => setShowGithubPicker(true)}
+                >
+                  Import from github
+                </p>
+
+              </div>
+              <div className="m-8 pr-20">
                 <label htmlFor="model-file" className="cursor-pointer">
                   <div className="flex flex-col items-center">
                     {isFileUploaded ? (
@@ -193,6 +221,7 @@ function CreateModel() {
                     className="hidden"
                     onChange={(e) => {
                       setModelFile(e.target.files[0]);
+                      setModelSourceType("file");
                       setIsFileUploaded(true);
                     }}
                   />
@@ -304,6 +333,10 @@ function CreateModel() {
           </button>
         </div>
       </div>
+
+      {showGithubPicker && (
+        <GithubModelPicker modelClosed={handleGithubModelSelection} />
+      )}
     </div>
   );
 }

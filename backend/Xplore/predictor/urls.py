@@ -16,7 +16,8 @@ from .views import (
     PredictPipeline,
     CreateContainer,
     RunContainer,
-    stream_video
+    stream_video,
+    GithubIntegration
 )
 
 urlpatterns = [
@@ -40,4 +41,5 @@ urlpatterns = [
     path('list-container/', container_list, name='list-container'),
     path('outputs/<uuid:job_id>/<str:filename>', stream_video, name='stream_video'),
     path('download/report/<str:report_id>', ReportDownloadView.as_view()),
+    path('github-integration/', GithubIntegration.as_view(), name='github-integration'),
 ]

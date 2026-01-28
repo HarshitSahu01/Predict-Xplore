@@ -1,5 +1,6 @@
 # views.py
 import os
+import requests
 import re
 import io
 import json
@@ -12,6 +13,7 @@ import subprocess
 import concurrent.futures
 from datetime import datetime
 from io import BytesIO
+from functools import cached_property
 
 import numpy as np
 import torch
@@ -26,6 +28,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
+from django.core.cache import cache
 from django.http import JsonResponse, HttpResponse, FileResponse, HttpResponseNotFound
 
 from rest_framework.views import APIView
@@ -577,15 +580,43 @@ class CreateModelView(APIView):
             if not name or not description or not model_type or not file_data:
                 return Response({"detail": "Required fields are missing."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # file_data expected as base64 string
-            if isinstance(file_data, str):
-                file_content = base64.b64decode(file_data)
+            model_source_type = data.get('model_source_type', 'file')
+
+            # Check if file_data is a URL
+            file_content = None
+            if model_source_type == 'link' and isinstance(file_data, str) and file_data.startswith('http'):
+                 # It's a URL, download it
+                try:
+                    logger.info(f"Downloading model from: {file_data}")
+                    download_response = requests.get(file_data, timeout=300) # 5 min timeout for large models
+                    if download_response.status_code == 200:
+                        # Create a ContentFile so Django handles it like an uploaded file
+                        file_content = ContentFile(download_response.content)
+                        file_content.name = os.path.basename(file_data.split('?')[0]) # Extract filename from URL
+                    else:
+                        return Response({"detail": f"Failed to download model from GitHub. Status: {download_response.status_code}"}, status=status.HTTP_400_BAD_REQUEST)
+                except Exception as e:
+                    logger.exception(f"Error downloading model: {e}")
+                    return Response({"detail": "Error downloading model from provided URL."}, status=status.HTTP_400_BAD_REQUEST)
+            elif isinstance(file_data, str): 
+                # It's base64
+                try:
+                    file_content = ContentFile(base64.b64decode(file_data))
+                    file_content.name = f"{name.replace(' ', '_')}.pt"
+                except Exception as e:
+                     return Response({"detail": "Invalid base64 string for model file."}, status=status.HTTP_400_BAD_REQUEST)
+
             else:
+                # It's likely a file object (multipart)
                 file_content = file_data
 
             model_thumbnail_content = None
             if model_thumbnail and isinstance(model_thumbnail, str):
-                model_thumbnail_content = base64.b64decode(model_thumbnail)
+                try:
+                    model_thumbnail_content = ContentFile(base64.b64decode(model_thumbnail))
+                    model_thumbnail_content.name = "thumbnail.png"
+                except:
+                    pass
 
             new_object = Model.objects.create(
                 name=name,
@@ -1045,3 +1076,55 @@ def stream_video(request, job_id, filename):
         response['Accept-Ranges'] = 'bytes'
         response['Cache-Control'] = 'public, max-age=3600'
         return response
+
+class GithubIntegration(APIView):
+    '''
+    Github integration API
+    Pulls the source repos for .pt/.pth models and .zip containers from
+    the github_models_urls list in settings.py
+    Converts and stores the repo link to api route during backend init
+    and then simply returns the models dictionary
+    '''
+    api_call_url = None 
+
+    def get(self, request):
+        cache_key = "github_models_list"
+        cached_models = cache.get(cache_key)
+        if cached_models is not None:
+            return Response(cached_models)
+
+        urls = self.get_api_call_url()
+        models = []
+        allowed_extensions = ('.pt', '.pth', '.zip')
+        
+        for url in urls:
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list):
+                        for item in data:
+                            if item.get('type') == 'file' and item.get('name', '').endswith(allowed_extensions):
+                                models.append({
+                                    "name": item.get('name'),
+                                    "size": item.get('size'),
+                                    "sha": item.get('sha'),
+                                    "download_url": item.get('download_url')
+                                })
+            except requests.RequestException:
+                continue
+        
+        cache.set(cache_key, models, 60)
+        return Response(models)
+
+    def get_api_call_url(self) -> list[str]:
+        if self.api_call_url is None:
+            github_repos = getattr(settings, 'GITHUB_MODEL_URLS', [])
+            self.api_call_url = []
+            pattern = r'https://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/(.+)'
+            for repo_url in github_repos:
+                match = re.match(pattern, repo_url)
+                if match:
+                    user, repo, branch, folder = match.groups()
+                    self.api_call_url.append(f"https://api.github.com/repos/{user}/{repo}/contents/{folder}?ref={branch}")
+        return self.api_call_url
