@@ -33,6 +33,7 @@ import VideoUploadPage from './user/VideoUploadPage';
 import AdminSTEADDashboard from './admin/pages/AdminSTEADDashboard';
 import AdminRTSPLivePage from './admin/pages/AdminRTSPLivePage';
 import AdminVideoUploadPage from './admin/pages/AdminVideoUploadPage';
+import AdminRTSPTaskDetail from './components/stead/AdminRTSPTaskDetail';
 
 function App() {
   return (
@@ -51,29 +52,30 @@ function App() {
           <Route path="/model-test" element={<Modeltestpage />} />
           <Route path="/model-test-run" element={<Modeltestrunpage />} />
           <Route path="/reports" element={<Reportpage />} />
-          <Route path="/container-test-run" element={<ContainerTestRun/>} />
-          
+          <Route path="/container-test-run" element={<ContainerTestRun />} />
+
           {/* STEAD Anomaly Detection Routes */}
           <Route path="/stead" element={<STEADDashboard />} />
           <Route path="/stead/rtsp-live" element={<RTSPLivePage />} />
           <Route path="/stead/video-upload" element={<VideoUploadPage />} />
-          
+
           {/* Admin Pages */}
           <Route path="/admin/dashboard" element={<AdminDashboard />} />
           <Route path="/admin/models" element={<AdminModelList />} />
           <Route path="/admin/create-model" element={<CreateModel />} />
-          <Route path="/admin/create-pipeline" element={<CreatePipeline />} />  
+          <Route path="/admin/create-pipeline" element={<CreatePipeline />} />
           <Route path="/admin/reports" element={<AdminReport />} />
           <Route path="/admin/tasks" element={<ProtectedRoute><Tasks /></ProtectedRoute>} />
           <Route path="/admin/tasks/:taskId/logs" element={<ProtectedRoute><TaskLog /></ProtectedRoute>} />
-          
+
           <Route path="/admin/manage-user" element={<ManageUser />} />
           <Route path="/admin/model-proceed" element={<ModelProceed />} />
           <Route path="/admin/model-test" element={<AdminModelTest />} />
-          
+
           {/* Admin STEAD Anomaly Detection Routes */}
           <Route path="/admin/stead" element={<AdminSTEADDashboard />} />
           <Route path="/admin/stead/rtsp-live" element={<AdminRTSPLivePage />} />
+          <Route path="/admin/rtsp/task/:taskId" element={<AdminRTSPTaskDetail />} />
           <Route path="/admin/stead/video-upload" element={<AdminVideoUploadPage />} />
         </Routes>
       </Router>

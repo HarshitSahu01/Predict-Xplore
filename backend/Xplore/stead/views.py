@@ -850,8 +850,7 @@ class RTSPLiveStartView(APIView):
     {
         "stream_url": "rtsp://...", // or tcp://localhost:8554 or /path/to/video.mp4
         "fps": 15,                  // Optional, default 15
-        "threshold": 0.7,           // Optional, default 0.7
-        "max_duration": 300         // Optional, max recording duration in seconds
+        "threshold": 0.7            // Optional, default 0.7
     }
     """
     permission_classes = [permissions.IsAuthenticated]
@@ -868,13 +867,10 @@ class RTSPLiveStartView(APIView):
         # Parse optional parameters
         fps = request.data.get('fps', 15)
         threshold = request.data.get('threshold', 0.7)
-        max_duration = request.data.get('max_duration')
         
         try:
             fps = int(fps)
             threshold = float(threshold)
-            if max_duration:
-                max_duration = int(max_duration)
         except (ValueError, TypeError) as e:
             return Response(
                 {'error': f'Invalid parameter: {e}'},
@@ -893,8 +889,7 @@ class RTSPLiveStartView(APIView):
                 stream_url=stream_url,
                 output_dir=output_dir,
                 fps=fps,
-                threshold=threshold,
-                max_duration=max_duration
+                threshold=threshold
             )
             
             # Start processing
@@ -913,7 +908,6 @@ class RTSPLiveStartView(APIView):
                 'stream_url': stream_url,
                 'fps': fps,
                 'threshold': threshold,
-                'max_duration': max_duration,
                 'status': processor.get_status()
             }, status=status.HTTP_201_CREATED)
             
@@ -1200,8 +1194,7 @@ class RTSPTestSimulatorView(APIView):
     {
         "video_path": "/path/to/test_video.mp4",  // or use default test video
         "fps": 15,
-        "threshold": 0.7,
-        "max_duration": 60  // Process only 60 seconds
+        "threshold": 0.7
     }
     """
     permission_classes = [permissions.IsAuthenticated]
@@ -1210,7 +1203,6 @@ class RTSPTestSimulatorView(APIView):
         video_path = request.data.get('video_path')
         fps = request.data.get('fps', 15)
         threshold = request.data.get('threshold', 0.7)
-        max_duration = request.data.get('max_duration', 60)  # Default 60 seconds for testing
         
         # If no video path provided, look for test videos
         if not video_path:
@@ -1237,7 +1229,6 @@ class RTSPTestSimulatorView(APIView):
         try:
             fps = int(fps)
             threshold = float(threshold)
-            max_duration = int(max_duration) if max_duration else None
         except (ValueError, TypeError) as e:
             return Response(
                 {'error': f'Invalid parameter: {e}'},
@@ -1253,8 +1244,7 @@ class RTSPTestSimulatorView(APIView):
                 stream_url=video_path,  # OpenCV can read video files directly
                 output_dir=output_dir,
                 fps=fps,
-                threshold=threshold,
-                max_duration=max_duration
+                threshold=threshold
             )
             
             success = processor.start()
@@ -1272,7 +1262,6 @@ class RTSPTestSimulatorView(APIView):
                 'source_video': video_path,
                 'fps': fps,
                 'threshold': threshold,
-                'max_duration': max_duration,
                 'note': 'Use /api/stead/rtsp/live/<job_id>/status/ to check progress',
                 'stop_endpoint': f'/api/stead/rtsp/live/{processor.job_id}/stop/'
             }, status=status.HTTP_201_CREATED)
@@ -1285,3 +1274,63 @@ class RTSPTestSimulatorView(APIView):
                 'success': False,
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RTSPLiveAnomalyClipView(APIView):
+    """
+    GET /api/stead/rtsp/live/anomaly-clip/<path:filepath>
+    
+    Serves generated extracted mp4 anomaly clips directly to the frontend.
+    """
+    authentication_classes = [QueryParamTokenAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, filepath):
+        try:
+            video_path = Path(settings.MEDIA_ROOT) / filepath
+            
+            if not video_path.exists() or not video_path.is_file():
+                raise Http404("Anomaly clip not found.")
+                
+            file_size = video_path.stat().st_size
+            range_header = request.META.get('HTTP_RANGE', '').strip()
+            
+            if range_header:
+                range_match = range_header.replace('bytes=', '').split('-')
+                start = int(range_match[0]) if range_match[0] else 0
+                end = int(range_match[1]) if range_match[1] else file_size - 1
+                length = end - start + 1
+                
+                def file_iterator():
+                    with open(video_path, 'rb') as f:
+                        f.seek(start)
+                        remaining = length
+                        while remaining > 0:
+                            chunk_size = min(8192, remaining)
+                            data = f.read(chunk_size)
+                            if not data:
+                                break
+                            remaining -= len(data)
+                            yield data
+                
+                response = StreamingHttpResponse(
+                    file_iterator(),
+                    status=206,
+                    content_type='video/mp4'
+                )
+                response['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+                response['Content-Length'] = length
+                response['Accept-Ranges'] = 'bytes'
+            else:
+                response = FileResponse(
+                    open(video_path, 'rb'),
+                    content_type='video/mp4'
+                )
+                response['Content-Length'] = file_size
+                response['Accept-Ranges'] = 'bytes'
+            
+            response['Content-Disposition'] = f'inline; filename="{video_path.name}"'
+            return response
+        except Exception as e:
+            raise Http404(f"Error serving clip: {e}")
+
