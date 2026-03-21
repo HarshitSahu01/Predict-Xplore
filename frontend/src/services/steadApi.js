@@ -17,6 +17,8 @@ const getAuthHeader = (token) => ({
   'Authorization': `Token ${token}`
 });
 
+const PREDICTOR_BASE_URL = 'http://127.0.0.1:8000/api/predictor';
+
 /**
  * Get multipart form header for file uploads
  */
@@ -59,7 +61,7 @@ export const uploadVideo = async (token, videoFile, threshold = 0.7, onProgress 
   const formData = new FormData();
   formData.append('video', videoFile);
   formData.append('threshold', threshold);
-  
+
   const config = {
     headers: getMultipartHeader(token),
     onUploadProgress: onProgress ? (progressEvent) => {
@@ -67,7 +69,7 @@ export const uploadVideo = async (token, videoFile, threshold = 0.7, onProgress 
       onProgress(percentCompleted);
     } : undefined
   };
-  
+
   const response = await axios.post(`${BASE_URL}/video/upload/`, formData, config);
   return response.data;
 };
@@ -115,10 +117,9 @@ export const startRTSPLive = async (token, streamUrl, options = {}) => {
   const data = {
     stream_url: streamUrl,
     fps: options.fps || 15,
-    threshold: options.threshold || 0.7,
-    max_duration: options.maxDuration || null
+    threshold: options.threshold || 0.7
   };
-  
+
   const response = await axios.post(`${BASE_URL}/rtsp/live/start/`, data, {
     headers: getAuthHeader(token)
   });
@@ -133,10 +134,9 @@ export const startTestSimulation = async (token, options = {}) => {
   const data = {
     video_path: options.videoPath || null,
     fps: options.fps || 15,
-    threshold: options.threshold || 0.7,
-    max_duration: options.maxDuration || 60
+    threshold: options.threshold || 0.7
   };
-  
+
   const response = await axios.post(`${BASE_URL}/rtsp/test/simulate/`, data, {
     headers: getAuthHeader(token)
   });
@@ -170,7 +170,7 @@ export const stopRTSPLive = async (token, jobId) => {
  * POST /api/stead/rtsp/live/<job_id>/control/
  */
 export const controlRTSPLive = async (token, jobId, action) => {
-  const response = await axios.post(`${BASE_URL}/rtsp/live/${jobId}/control/`, 
+  const response = await axios.post(`${BASE_URL}/rtsp/live/${jobId}/control/`,
     { action },
     { headers: getAuthHeader(token) }
   );
@@ -202,6 +202,58 @@ export const getRTSPLiveHLSUrl = (jobId) => {
   return `${BASE_URL}/rtsp/live/${jobId}/hls/`;
 };
 
+/**
+ * Get anomaly clip URL
+ */
+export const getAnomalyClipUrl = (clipPath) => {
+  return `${BASE_URL}/rtsp/live/anomaly-clip/${clipPath}`;
+};
+
+// ============= RTSP Container Live Processing =============
+
+export const getContainerList = async (token) => {
+  const response = await axios.get(`${PREDICTOR_BASE_URL}/list-container/`, {
+    headers: getAuthHeader(token)
+  });
+  return response.data;
+};
+
+export const startRTSPContainerJob = async (token, streamUrl, containerId, fps = 15) => {
+  const response = await axios.post(`${PREDICTOR_BASE_URL}/tasks/rtsp/start/`, {
+    rtsp_url: streamUrl,
+    container_id: containerId,
+    fps: fps
+  }, {
+    headers: getAuthHeader(token)
+  });
+  return response.data;
+};
+
+export const listRTSPContainerJobs = async (token) => {
+  const response = await axios.get(`${PREDICTOR_BASE_URL}/tasks/rtsp/`, {
+    headers: getAuthHeader(token)
+  });
+  return response.data;
+};
+
+export const getRTSPContainerJobDetails = async (token, taskId) => {
+  const response = await axios.get(`${PREDICTOR_BASE_URL}/tasks/rtsp/${taskId}/`, {
+    headers: getAuthHeader(token)
+  });
+  return response.data;
+};
+
+export const stopRTSPContainerJob = async (token, taskId) => {
+  const response = await axios.post(`${PREDICTOR_BASE_URL}/tasks/rtsp/${taskId}/stop/`, {}, {
+    headers: getAuthHeader(token)
+  });
+  return response.data;
+};
+
+export const getContainerAnomalyClipUrl = (clipPath) => {
+  return `http://127.0.0.1:8000/media/${clipPath}`;
+};
+
 // ============= Anomalies =============
 
 /**
@@ -213,7 +265,7 @@ export const listAnomalies = async (token, jobId = null, limit = 100) => {
   if (jobId) {
     url += `&job_id=${jobId}`;
   }
-  
+
   const response = await axios.get(url, {
     headers: getAuthHeader(token)
   });
@@ -269,13 +321,13 @@ export default {
   // Status
   checkModelStatus,
   checkFFmpegStatus,
-  
+
   // Video Upload
   uploadVideo,
   getVideoHistory,
   getVideoDetails,
   deleteVideo,
-  
+
   // RTSP Live
   startRTSPLive,
   startTestSimulation,
@@ -285,14 +337,22 @@ export default {
   listRTSPLiveJobs,
   getRTSPLiveStreamUrl,
   getRTSPLiveHLSUrl,
-  
+  getAnomalyClipUrl,
+
   // Anomalies
   listAnomalies,
   getAnomalyDetails,
   deleteAnomaly,
-  
-  // Streaming URLs
+
   getVideoStreamUrl,
   getVideoHLSUrl,
-  getVideoThumbnailUrl
+  getVideoThumbnailUrl,
+
+  // RTSP Container
+  getContainerList,
+  startRTSPContainerJob,
+  listRTSPContainerJobs,
+  getRTSPContainerJobDetails,
+  stopRTSPContainerJob,
+  getContainerAnomalyClipUrl
 };

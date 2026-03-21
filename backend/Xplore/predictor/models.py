@@ -112,6 +112,21 @@ class Task(models.Model):
     end_time = models.DateTimeField(null=True, blank=True, help_text="Time the task finished")
     status = models.CharField(max_length=50, choices=STATUS_CHOICES, default='Pending', help_text="Current state of task")
     log_file = models.CharField(max_length=500, null=True, blank=True, help_text="Path to log file")
+    
+    # RTSP Container specific fields
+    container = models.ForeignKey(Container, on_delete=models.SET_NULL, null=True, blank=True, help_text="Container linked to this RTSP task")
+    rtsp_url = models.CharField(max_length=500, null=True, blank=True, help_text="RTSP URL for streaming")
+    fps = models.IntegerField(null=True, blank=True, help_text="Frames per second to capture")
 
     def __str__(self):
         return f"{self.task_name} - {self.status}"
+
+class ContainerAnomaly(models.Model):
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='anomalies')
+    video_clip = models.FileField(upload_to='container_anomalies/', null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    confidence = models.FloatField(null=True, blank=True)
+    label = models.CharField(max_length=100, default='Suspicious')
+    
+    def __str__(self):
+        return f"Anomaly for {self.task.task_name} at {self.timestamp}"

@@ -10,6 +10,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { toast } from 'react-toastify';
 import {
@@ -19,9 +20,15 @@ import {
   stopRTSPLive,
   controlRTSPLive,
   listRTSPLiveJobs,
-  checkModelStatus,
   checkFFmpegStatus,
-  getRTSPLiveStreamUrl
+  getRTSPLiveStreamUrl,
+  getAnomalyClipUrl,
+  getContainerList,
+  startRTSPContainerJob,
+  listRTSPContainerJobs,
+  getRTSPContainerJobDetails,
+  stopRTSPContainerJob,
+  getContainerAnomalyClipUrl
 } from '../../services/steadApi';
 import {
   setModelStatus,
@@ -37,37 +44,44 @@ import {
 
 const AdminRTSPLiveProcessor = () => {
   const dispatch = useDispatch();
+  const navigate = useNavigate();
   const user = useSelector((state) => state.user.users[state.user.users.length - 1]);
   const { modelStatus, ffmpegStatus, currentJob, liveJobs, loading, error } = useSelector((state) => state.stead);
-  
+
   // Form state
   const [streamUrl, setStreamUrl] = useState('');
   const [fps, setFps] = useState(15);
   const [threshold, setThreshold] = useState(0.7);
-  const [maxDuration, setMaxDuration] = useState(60);
-  
+
+  // Container State
+  const [containers, setContainers] = useState([]);
+  const [selectedContainer, setSelectedContainer] = useState('');
+  const [containerJobs, setContainerJobs] = useState([]);
+
   // Processing state
   const [isProcessing, setIsProcessing] = useState(false);
   const [jobStatus, setJobStatus] = useState(null);
   const [completedResult, setCompletedResult] = useState(null);
-  
+  const [currentJobType, setCurrentJobType] = useState('stead');
+
   // Polling interval
   const pollingRef = useRef(null);
-  
+
   // Check statuses on mount
   useEffect(() => {
     if (user?.token) {
       fetchStatuses();
       fetchJobs();
+      fetchContainers();
     }
-    
+
     return () => {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
       }
     };
   }, [user?.token]);
-  
+
   const fetchStatuses = async () => {
     try {
       const [modelRes, ffmpegRes] = await Promise.all([
@@ -80,50 +94,75 @@ const AdminRTSPLiveProcessor = () => {
       console.error('Error fetching statuses:', err);
     }
   };
-  
+
   const fetchJobs = async () => {
     try {
       const res = await listRTSPLiveJobs(user.token);
       dispatch(setLiveJobs(res));
+
+      const cRes = await listRTSPContainerJobs(user.token);
+      setContainerJobs(cRes);
     } catch (err) {
       console.error('Error fetching jobs:', err);
     }
   };
-  
+
+  const fetchContainers = async () => {
+    try {
+      const res = await getContainerList(user.token);
+      setContainers(res);
+    } catch (err) {
+      console.error('Error fetching containers:', err);
+    }
+  };
+
   // Start processing
   const handleStartProcessing = async () => {
     if (!user?.token) {
       toast.error('Please login first');
       return;
     }
-    
+
     dispatch(setLoading(true));
     dispatch(setError(null));
     setCompletedResult(null);
-    
+
     try {
       let response;
-      
+
       // Use RTSP URL
       if (!streamUrl.trim()) {
         toast.error('Please enter a stream URL');
         dispatch(setLoading(false));
         return;
       }
-      
-      response = await startRTSPLive(user.token, streamUrl, {
-        fps,
-        threshold,
-        maxDuration: maxDuration || null
-      });
-      
-      if (response.success) {
-        dispatch(addLiveJob(response));
+
+      if (selectedContainer) {
+        response = await startRTSPContainerJob(user.token, streamUrl, selectedContainer, fps);
+        setCurrentJobType('container');
+      } else {
+        response = await startRTSPLive(user.token, streamUrl, {
+          fps,
+          threshold
+        });
+        setCurrentJobType('stead');
+      }
+
+      if (response.success || response.task_id) { // container API returns task_id
+        const jobId = response.job_id || response.task_id;
+
+        if (selectedContainer) {
+          // fetch container jobs again to update table
+          fetchJobs();
+        } else {
+          dispatch(addLiveJob(response));
+        }
+
         setIsProcessing(true);
         toast.success('Processing started!');
-        
+
         // Start polling for status
-        startStatusPolling(response.job_id);
+        startStatusPolling(jobId, selectedContainer ? 'container' : 'stead');
       } else {
         toast.error(response.error || 'Failed to start processing');
       }
@@ -135,36 +174,46 @@ const AdminRTSPLiveProcessor = () => {
       dispatch(setLoading(false));
     }
   };
-  
+
   // Start polling for job status
-  const startStatusPolling = useCallback((jobId) => {
+  const startStatusPolling = useCallback((jobId, jobType = currentJobType) => {
     // Clear existing interval
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
     }
-    
+
     // Poll immediately
-    pollJobStatus(jobId);
-    
+    pollJobStatus(jobId, jobType);
+
     // Then poll every 2 seconds
     pollingRef.current = setInterval(() => {
-      pollJobStatus(jobId);
+      pollJobStatus(jobId, jobType);
     }, 2000);
-  }, [user?.token]);
-  
-  const pollJobStatus = async (jobId) => {
+  }, [user?.token, currentJobType]);
+
+  const pollJobStatus = async (jobId, jobType = currentJobType) => {
     try {
-      const status = await getRTSPLiveStatus(user.token, jobId);
+      let status;
+      if (jobType === 'container') {
+        status = await getRTSPContainerJobDetails(user.token, jobId);
+      } else {
+        status = await getRTSPLiveStatus(user.token, jobId);
+      }
+
       setJobStatus(status);
-      dispatch(updateLiveJob({ jobId, data: status }));
-      
+      if (jobType === 'stead') {
+        dispatch(updateLiveJob({ jobId, data: status }));
+      } else {
+        setContainerJobs(prev => prev.map(j => j.job_id === jobId ? { ...j, ...status } : j));
+      }
+
       // Check if job has completed
       if (!status.is_running && status.stats?.status === 'stopped') {
         // Job completed
         setIsProcessing(false);
         clearInterval(pollingRef.current);
         pollingRef.current = null;
-        
+
         // Fetch final results
         handleStopProcessing(jobId, true);
       }
@@ -172,24 +221,29 @@ const AdminRTSPLiveProcessor = () => {
       console.error('Error polling status:', err);
     }
   };
-  
+
   // Stop processing
-  const handleStopProcessing = async (jobId = null, autoStopped = false) => {
+  const handleStopProcessing = async (jobId = null, autoStopped = false, jobType = currentJobType) => {
     const targetJobId = jobId || currentJob?.job_id || jobStatus?.job_id;
-    
+
     if (!targetJobId) {
       toast.error('No active job to stop');
       return;
     }
-    
+
     try {
-      const response = await stopRTSPLive(user.token, targetJobId);
-      
+      let response;
+      if (jobType === 'container') {
+        response = await stopRTSPContainerJob(user.token, targetJobId);
+      } else {
+        response = await stopRTSPLive(user.token, targetJobId);
+      }
+
       if (response.success) {
         setCompletedResult(response);
         setIsProcessing(false);
         dispatch(clearCurrentJob());
-        
+
         if (!autoStopped) {
           toast.success('Processing stopped!');
         } else {
@@ -209,14 +263,14 @@ const AdminRTSPLiveProcessor = () => {
       }
     }
   };
-  
+
   // Pause/Resume
   const handlePauseResume = async () => {
     const jobId = currentJob?.job_id || jobStatus?.job_id;
     if (!jobId) return;
-    
+
     const action = jobStatus?.is_paused ? 'resume' : 'pause';
-    
+
     try {
       await controlRTSPLive(user.token, jobId, action);
       toast.success(`Processing ${action}d`);
@@ -224,7 +278,7 @@ const AdminRTSPLiveProcessor = () => {
       toast.error(err.response?.data?.error || err.message);
     }
   };
-  
+
   // Format time
   const formatDuration = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -244,39 +298,35 @@ const AdminRTSPLiveProcessor = () => {
             Process RTSP streams or video files with STEAD model for real-time anomaly detection
           </p>
         </div>
-        
+
         {/* Status Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
           {/* Model Status */}
-          <div className={`bg-white rounded-xl p-4 shadow-sm border-l-4 ${
-            modelStatus.status === 'ready' ? 'border-green-500' : 'border-yellow-500'
-          }`}>
-            <h3 className="text-sm font-medium text-gray-500 mb-1">STEAD Model</h3>
-            <p className={`text-lg font-semibold ${
-              modelStatus.status === 'ready' ? 'text-green-600' : 'text-yellow-600'
+          <div className={`bg-white rounded-xl p-4 shadow-sm border-l-4 ${modelStatus.status === 'ready' ? 'border-green-500' : 'border-yellow-500'
             }`}>
+            <h3 className="text-sm font-medium text-gray-500 mb-1">STEAD Model</h3>
+            <p className={`text-lg font-semibold ${modelStatus.status === 'ready' ? 'text-green-600' : 'text-yellow-600'
+              }`}>
               {modelStatus.status === 'ready' ? 'Ready' : 'Loading...'}
             </p>
             <p className="text-xs text-gray-400 mt-1">
               Device: {modelStatus.device || 'N/A'}
             </p>
           </div>
-          
+
           {/* FFmpeg Status */}
-          <div className={`bg-white rounded-xl p-4 shadow-sm border-l-4 ${
-            ffmpegStatus.available ? 'border-green-500' : 'border-red-500'
-          }`}>
-            <h3 className="text-sm font-medium text-gray-500 mb-1">FFmpeg</h3>
-            <p className={`text-lg font-semibold ${
-              ffmpegStatus.available ? 'text-green-600' : 'text-red-600'
+          <div className={`bg-white rounded-xl p-4 shadow-sm border-l-4 ${ffmpegStatus.available ? 'border-green-500' : 'border-red-500'
             }`}>
+            <h3 className="text-sm font-medium text-gray-500 mb-1">FFmpeg</h3>
+            <p className={`text-lg font-semibold ${ffmpegStatus.available ? 'text-green-600' : 'text-red-600'
+              }`}>
               {ffmpegStatus.available ? 'Available' : 'Not Found'}
             </p>
             <p className="text-xs text-gray-400 mt-1 truncate">
               {ffmpegStatus.path || 'Install FFmpeg for streaming'}
             </p>
           </div>
-          
+
           {/* Active Jobs */}
           <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-blue-500">
             <h3 className="text-sm font-medium text-gray-500 mb-1">Active Jobs</h3>
@@ -288,7 +338,7 @@ const AdminRTSPLiveProcessor = () => {
             </p>
           </div>
         </div>
-        
+
         {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left Panel - Configuration */}
@@ -296,7 +346,7 @@ const AdminRTSPLiveProcessor = () => {
             <h2 className="text-xl font-semibold text-[#123087] mb-4">
               Configuration
             </h2>
-            
+
             {/* RTSP URL Input */}
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -314,9 +364,27 @@ const AdminRTSPLiveProcessor = () => {
                 Supports RTSP, TCP, UDP streams, or video file paths
               </p>
             </div>
-            
+
+            {/* Container Selection */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Container Model (Optional)
+              </label>
+              <select
+                value={selectedContainer}
+                onChange={(e) => setSelectedContainer(e.target.value)}
+                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#6966FF] focus:border-transparent bg-white"
+                disabled={isProcessing}
+              >
+                <option value="">Use Default STEAD Model</option>
+                {containers.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+
             {/* Parameters */}
-            <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="grid grid-cols-2 gap-4 mb-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   FPS
@@ -331,7 +399,7 @@ const AdminRTSPLiveProcessor = () => {
                   disabled={isProcessing}
                 />
               </div>
-              
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Threshold
@@ -347,34 +415,18 @@ const AdminRTSPLiveProcessor = () => {
                   disabled={isProcessing}
                 />
               </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Duration (s)
-                </label>
-                <input
-                  type="number"
-                  value={maxDuration}
-                  onChange={(e) => setMaxDuration(parseInt(e.target.value) || 60)}
-                  min="10"
-                  max="3600"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#6966FF]"
-                  disabled={isProcessing}
-                />
-              </div>
             </div>
-            
+
             {/* Action Buttons */}
             <div className="flex gap-4">
               {!isProcessing ? (
                 <button
                   onClick={handleStartProcessing}
                   disabled={loading || !streamUrl}
-                  className={`flex-1 py-3 px-6 rounded-xl font-semibold text-white transition ${
-                    loading || !streamUrl
-                      ? 'bg-gray-400 cursor-not-allowed'
-                      : 'bg-[#6966FF] hover:bg-[#5855DD]'
-                  }`}
+                  className={`flex-1 py-3 px-6 rounded-xl font-semibold text-white transition ${loading || !streamUrl
+                    ? 'bg-gray-400 cursor-not-allowed'
+                    : 'bg-[#6966FF] hover:bg-[#5855DD]'
+                    }`}
                 >
                   {loading ? 'Starting...' : 'Start Processing'}
                 </button>
@@ -396,30 +448,29 @@ const AdminRTSPLiveProcessor = () => {
               )}
             </div>
           </div>
-          
+
           {/* Right Panel - Status & Results */}
           <div className="bg-white rounded-xl p-6 shadow-sm">
             <h2 className="text-xl font-semibold text-[#123087] mb-4">
               {isProcessing ? 'Live Status' : 'Results'}
             </h2>
-            
+
             {/* Processing Status */}
             {isProcessing && jobStatus && (
               <div className="space-y-4">
                 {/* Status Badge */}
                 <div className="flex items-center justify-between">
-                  <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                    jobStatus.is_paused
-                      ? 'bg-yellow-100 text-yellow-800'
-                      : 'bg-green-100 text-green-800'
-                  }`}>
+                  <span className={`px-3 py-1 rounded-full text-sm font-medium ${jobStatus.is_paused
+                    ? 'bg-yellow-100 text-yellow-800'
+                    : 'bg-green-100 text-green-800'
+                    }`}>
                     {jobStatus.is_paused ? 'Paused' : 'Processing'}
                   </span>
                   <span className="text-sm text-gray-500">
                     Job: {jobStatus.job_id?.slice(0, 8)}...
                   </span>
                 </div>
-                
+
                 {/* Stats Grid */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="bg-gray-50 rounded-lg p-3">
@@ -447,29 +498,17 @@ const AdminRTSPLiveProcessor = () => {
                     </p>
                   </div>
                 </div>
-                
-                {/* Progress Bar */}
-                {maxDuration && jobStatus.stats?.total_frames > 0 && (
-                  <div className="mt-4">
-                    <div className="flex justify-between text-xs text-gray-500 mb-1">
-                      <span>Progress</span>
-                      <span>
-                        {Math.min(100, (jobStatus.stats.total_frames / (fps * maxDuration) * 100)).toFixed(1)}%
-                      </span>
-                    </div>
-                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-[#6966FF] transition-all duration-300"
-                        style={{
-                          width: `${Math.min(100, (jobStatus.stats.total_frames / (fps * maxDuration) * 100))}%`
-                        }}
-                      />
-                    </div>
+
+                {/* Progress Bar (Removed for continuous stream) */}
+                <div className="mt-4">
+                  <div className="flex justify-between text-xs text-gray-500 mb-1">
+                    <span>Continuous Collection</span>
+                    <span className="animate-pulse text-red-500 font-bold ml-2">● LIVE</span>
                   </div>
-                )}
+                </div>
               </div>
             )}
-            
+
             {/* Completed Results */}
             {completedResult && !isProcessing && (
               <div className="space-y-4">
@@ -479,7 +518,7 @@ const AdminRTSPLiveProcessor = () => {
                     Processing Complete
                   </span>
                 </div>
-                
+
                 {/* Summary Stats */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="bg-green-50 rounded-lg p-3">
@@ -495,7 +534,7 @@ const AdminRTSPLiveProcessor = () => {
                     </p>
                   </div>
                 </div>
-                
+
                 {/* Output Video */}
                 {completedResult.output?.output_video && (
                   <div className="mt-4">
@@ -509,7 +548,7 @@ const AdminRTSPLiveProcessor = () => {
                     >
                       Your browser does not support video playback.
                     </video>
-                    
+
                     {/* Download Button */}
                     <a
                       href={completedResult.streaming_urls?.output_video}
@@ -517,42 +556,69 @@ const AdminRTSPLiveProcessor = () => {
                       rel="noopener noreferrer"
                       className="mt-2 inline-flex items-center gap-2 px-4 py-2 bg-[#6966FF] text-white rounded-lg hover:bg-[#5855DD] transition"
                     >
-                      Download Video
+                      Download Full Session Recording
                     </a>
-                  </div>
-                )}
-                
-                {/* Anomaly List */}
-                {completedResult.stats?.anomaly_clips?.length > 0 && (
-                  <div className="mt-4">
-                    <h3 className="text-sm font-medium text-gray-700 mb-2">
-                      Detected Anomalies
-                    </h3>
-                    <div className="max-h-48 overflow-y-auto space-y-2">
-                      {completedResult.stats.anomaly_clips.map((clip, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between bg-red-50 rounded-lg p-3"
-                        >
-                          <div>
-                            <p className="text-sm font-medium text-red-800">
-                              Anomaly #{idx + 1}
-                            </p>
-                            <p className="text-xs text-gray-500">
-                              Frames {clip.frame_start} - {clip.frame_end}
-                            </p>
-                          </div>
-                          <span className="text-lg font-bold text-red-600">
-                            {(clip.anomaly_score * 100).toFixed(1)}%
-                          </span>
-                        </div>
-                      ))}
-                    </div>
                   </div>
                 )}
               </div>
             )}
-            
+
+            {/* Shared Anomaly List (shown during live and after complete) */}
+            {((isProcessing && jobStatus?.stats?.anomaly_clips?.length > 0) ||
+              (!isProcessing && completedResult?.stats?.anomaly_clips?.length > 0)) && (
+                <div className="mt-8">
+                  <h3 className="text-sm font-medium text-gray-700 mb-2">
+                    Detected Anomalies
+                  </h3>
+                  <div className="max-h-96 overflow-y-auto space-y-4 pr-2">
+                    {((isProcessing ? jobStatus.stats : completedResult.stats).anomaly_clips).map((clip, idx) => (
+                      <div
+                        key={idx}
+                        className="flex flex-col bg-red-50 rounded-lg p-3 border border-red-100"
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div>
+                            <p className="text-sm font-medium text-red-800 flex items-center gap-2">
+                              Anomaly #{idx + 1}
+                              <span className="text-xs bg-red-200 text-red-800 px-2 py-0.5 rounded-full">
+                                Score: {(clip.anomaly_score * 100).toFixed(1)}%
+                              </span>
+                            </p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              Frames {clip.frame_start} - {clip.frame_end}
+                            </p>
+                          </div>
+                        </div>
+
+                        {clip.video_path ? (
+                          <div className="mt-2 text-center">
+                            <video
+                              controls
+                              preload="metadata"
+                              className="w-full rounded-lg bg-black object-contain max-h-[300px]"
+                              src={clip.video_path.startsWith('container') ? getContainerAnomalyClipUrl(clip.video_path) : `${getAnomalyClipUrl(clip.video_path)}?token=${user.token}`}
+                            >
+                              Your browser does not support video playback.
+                            </video>
+                            <a
+                              href={clip.video_path.startsWith('container') ? getContainerAnomalyClipUrl(clip.video_path) : `${getAnomalyClipUrl(clip.video_path)}?token=${user.token}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="mt-2 text-xs text-blue-600 hover:text-blue-800 inline-block align-right"
+                            >
+                              Download Clip
+                            </a>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-gray-400 mt-1 italic w-full text-center">
+                            Clip extraction unavailable or processing...
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             {/* Empty State */}
             {!isProcessing && !completedResult && (
               <div className="text-center py-12">
@@ -568,7 +634,7 @@ const AdminRTSPLiveProcessor = () => {
             )}
           </div>
         </div>
-        
+
         {/* Previous Jobs */}
         {liveJobs.length > 0 && (
           <div className="mt-8 bg-white rounded-xl p-6 shadow-sm">
@@ -593,11 +659,10 @@ const AdminRTSPLiveProcessor = () => {
                         {job.job_id?.slice(0, 12)}...
                       </td>
                       <td className="py-3 pr-4">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          job.is_running
-                            ? 'bg-green-100 text-green-800'
-                            : 'bg-gray-100 text-gray-800'
-                        }`}>
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${job.is_running
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-gray-100 text-gray-800'
+                          }`}>
                           {job.is_running ? 'Running' : job.stats?.status || 'Stopped'}
                         </span>
                       </td>
@@ -616,6 +681,59 @@ const AdminRTSPLiveProcessor = () => {
                             View Results
                           </button>
                         )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Previous Container Jobs */}
+        {containerJobs.length > 0 && (
+          <div className="mt-8 bg-white rounded-xl p-6 shadow-sm">
+            <h2 className="text-xl font-semibold text-[#123087] mb-4">
+              Previous Container Tasks
+            </h2>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="text-left text-sm text-gray-500 border-b">
+                    <th className="pb-3 pr-4">Task Name</th>
+                    <th className="pb-3 pr-4">Container</th>
+                    <th className="pb-3 pr-4">Status</th>
+                    <th className="pb-3 pr-4">Anomalies</th>
+                    <th className="pb-3 pr-4">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {containerJobs.slice(0, 10).map((job) => (
+                    <tr key={job.job_id} className="border-b last:border-0 hover:bg-gray-50 cursor-pointer" onClick={() => navigate(`/admin/rtsp/task/${job.job_id}`)}>
+                      <td className="py-3 pr-4 font-mono text-sm" style={{ whiteSpace: 'nowrap' }}>
+                        {job.task_name}
+                      </td>
+                      <td className="py-3 pr-4 text-sm" style={{ whiteSpace: 'nowrap' }}>
+                        {job.container_name}
+                      </td>
+                      <td className="py-3 pr-4">
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${job.is_running
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-gray-100 text-gray-800'
+                          }`}>
+                          {job.is_running ? 'Running' : job.stats?.status || 'Stopped'}
+                        </span>
+                      </td>
+                      <td className="py-3 pr-4 text-sm text-red-600 font-medium">
+                        {job.stats?.anomalies_detected || 0}
+                      </td>
+                      <td className="py-3 pr-4">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); navigate(`/admin/rtsp/task/${job.job_id}`); }}
+                          className="text-[#6966FF] text-sm hover:underline"
+                        >
+                          View Details
+                        </button>
                       </td>
                     </tr>
                   ))}

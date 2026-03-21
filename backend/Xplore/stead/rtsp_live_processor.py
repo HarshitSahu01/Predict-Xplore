@@ -47,7 +47,6 @@ class RTSPLiveProcessor:
         fps: int = 15,
         threshold: float = 0.7,
         job_id: str = None,
-        max_duration: int = None,  # Max recording duration in seconds
         on_anomaly_callback: Callable = None
     ):
         """
@@ -57,7 +56,6 @@ class RTSPLiveProcessor:
             fps: Target frames per second
             threshold: Anomaly detection threshold
             job_id: Unique identifier for this job
-            max_duration: Maximum duration to record (None for unlimited)
             on_anomaly_callback: Function called when anomaly is detected
         """
         self.stream_url = stream_url
@@ -65,7 +63,6 @@ class RTSPLiveProcessor:
         self.fps = fps
         self.threshold = threshold
         self.job_id = job_id or str(uuid.uuid4())
-        self.max_duration = max_duration
         self.on_anomaly_callback = on_anomaly_callback
         
         # Create output directory
@@ -112,11 +109,21 @@ class RTSPLiveProcessor:
         self.frame_height = None
         self.source_fps = None
         
-        # Lock for thread safety
-        self.lock = threading.Lock()
+        # Anomaly clip recording state
+        self.anomaly_writer = None
+        self.anomaly_clip_path = None
+        self.anomaly_clip_start_frame = 0
+        self.is_recording_anomaly = False
+        self.anomaly_post_buffer_frames = 45  # Keep recording for ~3 secs after anomaly ends
+        self.anomaly_frames_since_last = 0
+        self.anomaly_clip_index = 0
+        self.anomaly_max_score = 0.0
         
         # Error tracking
         self.error_message = None
+        
+        # Thread safety lock
+        self.lock = threading.Lock()
     
     def _get_model(self):
         """Lazy load the STEAD model."""
@@ -241,14 +248,6 @@ class RTSPLiveProcessor:
                     time.sleep(0.1)
                     continue
                 
-                # Check max duration
-                if self.max_duration:
-                    elapsed = time.time() - start_time
-                    if elapsed >= self.max_duration:
-                        logger.info(f"Max duration reached: {self.max_duration}s")
-                        self.stop()
-                        break
-                
                 ret, frame = self.cap.read()
                 
                 if not ret:
@@ -332,34 +331,128 @@ class RTSPLiveProcessor:
                             len(original_frames)
                         )
                         self.video_writer.write(annotated_frame)
+                        
+                        # Handle anomaly clip recording
+                        if has_anomaly:
+                            self.anomaly_frames_since_last = 0
+                            self.anomaly_max_score = max(self.anomaly_max_score, anomaly_score)
+                            
+                            if not self.is_recording_anomaly:
+                                # Start new clip
+                                self.is_recording_anomaly = True
+                                self.anomaly_clip_index += 1
+                                self.anomaly_clip_start_frame = self.stats['total_frames'] - 16 + i
+                                
+                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                filename = f"stead_anomaly_{self.job_id}_{self.anomaly_clip_index}_{timestamp}.mp4"
+                                self.anomaly_clip_path = str(self.output_dir / filename)
+                                
+                                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                self.anomaly_writer = cv2.VideoWriter(
+                                    self.anomaly_clip_path,
+                                    fourcc,
+                                    self.source_fps or self.fps,
+                                    (self.frame_width, self.frame_height)
+                                )
+                                logger.info(f"Started recording anomaly clip: {self.anomaly_clip_path}")
+                                
+                            if self.anomaly_writer:
+                                self.anomaly_writer.write(annotated_frame)
+                                
+                        elif self.is_recording_anomaly:
+                            self.anomaly_frames_since_last += 1
+                            if self.anomaly_writer:
+                                self.anomaly_writer.write(annotated_frame)
+                                
+                            # Stop clip if buffer exhausted
+                            if self.anomaly_frames_since_last >= self.anomaly_post_buffer_frames:
+                                self._finalize_anomaly_clip()
                     
-                    # Track anomalies
-                    if has_anomaly:
+                    # Track anomalies structurally
+                    if has_anomaly and self.anomaly_frames_since_last == 0 and not getattr(self, '_fired_anomaly_callback_for_current', False):
+                        # Only increment the master count once per continuous anomaly event if desired,
+                        # but keeping as per original logic to increment immediately.
+                        # Setting flag to only fire the callback once per anomaly event.
+                        self._fired_anomaly_callback_for_current = True
                         with self.lock:
                             self.stats['anomalies_detected'] += 1
-                            anomaly_info = {
-                                'clip_index': self.stats['total_clips_processed'],
-                                'frame_start': self.stats['total_frames'] - 16,
-                                'frame_end': self.stats['total_frames'],
-                                'anomaly_score': anomaly_score,
-                                'timestamp': datetime.now().isoformat()
-                            }
-                            self.stats['anomaly_clips'].append(anomaly_info)
-                        
-                        # Call callback if provided
-                        if self.on_anomaly_callback:
-                            self.on_anomaly_callback(anomaly_info)
-                        
-                        logger.info(f"Anomaly detected! Score: {anomaly_score:.3f}")
-                    
+                            
+                    elif not has_anomaly and self.anomaly_frames_since_last >= self.anomaly_post_buffer_frames:
+                        self._fired_anomaly_callback_for_current = False
+                            
                 except Exception as e:
                     logger.error(f"Inference error: {e}")
                     # Write frames without annotation on error
                     for frame in original_frames:
                         self.video_writer.write(frame)
+                        if self.is_recording_anomaly and self.anomaly_writer:
+                           self.anomaly_writer.write(frame)
                         
         except Exception as e:
             logger.error(f"Inference loop error: {e}")
+            
+    def _finalize_anomaly_clip(self):
+        """Stop current anomaly writer and enqueue it for web conversion."""
+        self.is_recording_anomaly = False
+        if self.anomaly_writer:
+            self.anomaly_writer.release()
+            self.anomaly_writer = None
+            
+        logger.info(f"Finished recording anomaly clip: {self.anomaly_clip_path}")
+        
+        # We spawn a thread to convert the MP4 so it doesn't block inference loop
+        def convert_and_register_clip(raw_path, job_id, clip_idx, start_frame, score):
+            from .video_streaming import get_stream_manager
+            
+            try:
+                stream_manager = get_stream_manager()
+                
+                web_ready_filename = f"{Path(raw_path).stem}_web.mp4"
+                web_ready_path = str(Path(raw_path).parent / web_ready_filename)
+                
+                success = stream_manager.ffmpeg.convert_to_web_format(
+                    input_path=raw_path,
+                    output_path=web_ready_path,
+                    crf=26  # Slightly lower quality for faster encoding of short clips
+                )
+                
+                if success:
+                    # Make path relative to MEDIA_ROOT
+                    from django.conf import settings
+                    rel_path = os.path.relpath(web_ready_path, settings.MEDIA_ROOT)
+                    
+                    anomaly_info = {
+                        'clip_index': clip_idx,
+                        'frame_start': start_frame,
+                        'frame_end': self.stats['total_frames'],
+                        'anomaly_score': float(score),
+                        'timestamp': datetime.now().isoformat(),
+                        'video_path': rel_path
+                    }
+                    
+                    with self.lock:
+                        self.stats['anomaly_clips'].append(anomaly_info)
+                        
+                    if self.on_anomaly_callback:
+                        self.on_anomaly_callback(anomaly_info)
+                        
+                    # Clean up the raw opencv mp4 to save space
+                    try:
+                        os.remove(raw_path)
+                    except Exception:
+                        pass
+                else:
+                    logger.error("Failed to convert anomaly clip to web format")
+            except Exception as e:
+                logger.error(f"Error finalizing anomaly clip: {e}")
+
+        threading.Thread(
+            target=convert_and_register_clip,
+            args=(self.anomaly_clip_path, self.job_id, self.anomaly_clip_index, self.anomaly_clip_start_frame, self.anomaly_max_score),
+            daemon=True
+        ).start()
+        
+        self.anomaly_max_score = 0.0
     
     def _annotate_frame(
         self,
@@ -435,6 +528,9 @@ class RTSPLiveProcessor:
         
         if self.inference_thread and self.inference_thread.is_alive():
             self.inference_thread.join(timeout=5)
+            
+        if self.is_recording_anomaly:
+            self._finalize_anomaly_clip()
         
         # Process remaining frames in buffer
         self._process_remaining_frames()
@@ -543,7 +639,6 @@ class RTSPLiveManager:
         output_dir: str,
         fps: int = 15,
         threshold: float = 0.7,
-        max_duration: int = None,
         on_anomaly_callback: Callable = None
     ) -> RTSPLiveProcessor:
         """
@@ -560,7 +655,6 @@ class RTSPLiveManager:
             fps=fps,
             threshold=threshold,
             job_id=job_id,
-            max_duration=max_duration,
             on_anomaly_callback=on_anomaly_callback
         )
         
