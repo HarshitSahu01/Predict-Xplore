@@ -25,6 +25,11 @@ from .views import (
     TaskListView,
     TaskLogView
 )
+from .rtsp_views import (
+    RTSPContainerTaskView,
+    RTSPContainerTaskDetailView,
+    RTSPContainerTaskActionView
+)
 
 urlpatterns = [
     path('instance/upload', ImageUploadView.as_view(), name='image-upload'),
@@ -52,6 +57,11 @@ urlpatterns = [
     path('github/tree/', GithubTreeView.as_view(), name='github-tree'),
     path('container-management/', ContainerManagementView.as_view(), name='container-management'),
     path('container-update/', ContainerUpdateView.as_view(), name='container-update'),
-    path('tasks/', TaskListView.as_view(), name='task-list'),
     path('tasks/<uuid:task_id>/logs/', TaskLogView.as_view(), name='task-logs'),
+    
+    # RTSP Container Endpoints
+    path('tasks/rtsp/start/', RTSPContainerTaskView.as_view(), name='rtsp-container-start'),
+    path('tasks/rtsp/', RTSPContainerTaskView.as_view(), name='rtsp-container-list'),
+    path('tasks/rtsp/<uuid:task_id>/', RTSPContainerTaskDetailView.as_view(), name='rtsp-container-detail'),
+    path('tasks/rtsp/<uuid:task_id>/<str:action>/', RTSPContainerTaskActionView.as_view(), name='rtsp-container-action'),
 ]

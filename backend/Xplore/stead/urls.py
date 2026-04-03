@@ -38,6 +38,7 @@ from .views import (
     RTSPLiveStreamView,
     RTSPLiveHLSView,
     RTSPTestSimulatorView,
+    RTSPLiveAnomalyClipView,
     
     # Anomalies
     AnomalyListView,
@@ -82,6 +83,7 @@ urlpatterns = [
     path('rtsp/live/<str:job_id>/stream/', RTSPLiveStreamView.as_view(), name='rtsp-live-stream'),
     path('rtsp/live/<str:job_id>/hls/', RTSPLiveHLSView.as_view(), name='rtsp-live-hls-playlist'),
     path('rtsp/live/<str:job_id>/hls/<str:filename>', RTSPLiveHLSView.as_view(), name='rtsp-live-hls-segment'),
+    path('rtsp/live/anomaly-clip/<path:filepath>', RTSPLiveAnomalyClipView.as_view(), name='rtsp-live-anomaly-clip'),
     
     # Test simulator - use local video as RTSP stream
     path('rtsp/test/simulate/', RTSPTestSimulatorView.as_view(), name='rtsp-test-simulate'),

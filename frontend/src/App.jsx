@@ -33,6 +33,7 @@ import VideoUploadPage from './user/VideoUploadPage';
 import AdminSTEADDashboard from './admin/pages/AdminSTEADDashboard';
 import AdminRTSPLivePage from './admin/pages/AdminRTSPLivePage';
 import AdminVideoUploadPage from './admin/pages/AdminVideoUploadPage';
+import AdminRTSPTaskDetail from './components/stead/AdminRTSPTaskDetail';
 
 function App() {
   return (
@@ -75,6 +76,7 @@ function App() {
           {/* Admin STEAD Anomaly Detection Routes */}
           <Route path="/admin/stead" element={<AdminSTEADDashboard />} />
           <Route path="/admin/stead/rtsp-live" element={<AdminRTSPLivePage />} />
+          <Route path="/admin/rtsp/task/:taskId" element={<AdminRTSPTaskDetail />} />
           <Route path="/admin/stead/video-upload" element={<AdminVideoUploadPage />} />
         </Routes>
       </Router>
